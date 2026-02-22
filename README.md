@@ -1,174 +1,128 @@
 # Modernizer Agent
 
-Modernizer Agent is a local, iterative code-modernization assistant built around a LangGraph workflow. It scans a target repository, creates a file-by-file modernization plan, proposes concrete edits, asks for user approval, verifies each accepted change (lint + tests), and commits successful updates on a dedicated branch.
+Modernizer Agent is a local, iterative code-modernization assistant built with LangGraph and a local Ollama model. It scans a target repository, creates a file-by-file plan, proposes diffs, asks for explicit approval, verifies changes (lint + tests), and commits only verified updates.
 
-The system is designed to be conservative:
-- one plan item per file
-- explicit user approval before applying each diff
-- automatic verification before commit
-- retry with memory hints on failures
+## Current Setup (This Repo)
 
-## What It Does
+Repository structure:
+- `README.md` (repo root)
+- `modernizer_agent/pyproject.toml` (project metadata + console script)
+- `modernizer_agent/requirements.txt` (minimal runtime deps)
+- `modernizer_agent/...` (Python package source code)
 
-Given a modernization goal such as:
-- "Add type hints to public APIs"
-- "Replace deprecated Python APIs"
-- "Refactor legacy modules incrementally"
-
-the agent executes this loop:
-1. Read repository code files and build a summary.
-2. Ask the LLM for an ordered JSON plan (`file + change` pairs).
-3. For each plan item, ask the LLM for a full-file rewrite and compute a unified diff.
-4. Show the diff and prompt you to `Apply`, `Skip`, or `Quit`.
-5. If applied, run linter and tests.
-6. If verification passes, commit the change; if not, revert and retry (up to configured limits).
-
-## Repository Layout
-
-- `modernizer_agent/main.py`: CLI entry point and startup flow.
-- `modernizer_agent/config.py`: central config constants and env overrides.
-- `modernizer_agent/agent/controller.py`: main orchestration loop.
-- `modernizer_agent/agent/planner.py`: repo scan + plan generation.
-- `modernizer_agent/agent/executor.py`: per-file change generation and apply logic.
-- `modernizer_agent/agent/verifier.py`: lint/test verification abstraction.
-- `modernizer_agent/agent/memory.py`: SQLite memory store for error/fix history.
-- `modernizer_agent/llm/ollama_client.py`: Ollama API wrapper with JSON enforcement.
-- `modernizer_agent/tools/`: file, git, and test/lint tool wrappers.
-- `modernizer_agent/prompts/system_prompt.txt`: bundled system prompt.
-- `modernizer_agent/database/memory.db`: runtime SQLite memory database.
-
-## Architecture Overview
-
-### 1) Planner
-- Lists files under the target repo.
-- Filters to code extensions (`.py`, `.js`, `.ts`, `.java`, `.go`, etc.).
-- Reads a short preview per file.
-- Prompts the model to return JSON with small, single-file plan items.
-
-### 2) Executor
-- Reads the target file content.
-- Prompts the model for the full updated file content plus explanation.
-- Produces a unified diff against original content.
-- Applies the change only after explicit user approval.
-
-### 3) Verifier
-- Runs lint and test commands for the target repository.
-- Default linter strategy: primary (`ruff check`) then fallback (`flake8`).
-- Default test command: `python3 -m pytest`.
-- Treats "no tests collected" as pass.
-
-### 4) Memory
-- Stores prior attempts in SQLite (`error_text`, `applied_fix`, `success`, `file_path`).
-- On retries, surfaces similar past outcomes to the model as hints.
-- Uses normalized error signatures plus keyword fallback matching.
-
-### 5) Controller
-- Coordinates full lifecycle: plan -> propose -> approve -> verify -> commit/retry.
-- Uses a LangGraph state graph to orchestrate setup, item processing, and completion.
-- Creates or checks out a `modernize/*` branch before changes.
-- Enforces retry cap per item and optional total iteration cap.
+Entry points:
+- Module run: `python -m modernizer_agent.main`
+- Installed console script: `modernizer-agent`
 
 ## Prerequisites
 
-- Python 3.10+ recommended
-- `git` installed and available in PATH
-- Ollama running locally (default: `http://localhost:11434`)
-- A pulled Ollama model (default: `qwen3:8b`)
+- Python 3.10+
+- `git` in PATH
+- Ollama running locally (default `http://localhost:11434`)
+- A pulled Ollama model (default `qwen3:8b`)
 
-Optional but recommended:
-- `ruff` (or `flake8`) for linting
+Optional:
+- `ruff` or `flake8` for linting
 - `pytest` for tests
 
-## Setup
+## Install
 
-From project root:
+From repo root:
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r modernizer_agent/requirements.txt
+.venv\Scripts\Activate.ps1
+python -m pip install -r modernizer_agent\requirements.txt
+python -m pip install -e .\modernizer_agent
 ```
 
-Install optional tooling in the environment as needed:
+Optional dev tools:
 
-```bash
-pip install ruff pytest
+```powershell
+python -m pip install -e .\modernizer_agent[dev]
 ```
 
-## Running the Agent
+## Run
 
-Use the module entrypoint:
+From repo root (or any environment where package is installed):
 
-```bash
+```powershell
 python -m modernizer_agent.main --repo <path-to-target-repo> --goal "<modernization-goal>"
+```
+
+Or via console script:
+
+```powershell
+modernizer-agent --repo <path-to-target-repo> --goal "<modernization-goal>"
 ```
 
 Example:
 
-```bash
-python -m modernizer_agent.main --repo C:\work\legacy-service --goal "Add type hints and remove deprecated syntax"
+```powershell
+modernizer-agent --repo C:\work\legacy-service --goal "Add type hints and remove deprecated syntax"
 ```
 
 Useful flags:
-- `--max-iterations <n>`: global cap for control-loop iterations.
-- `--dry-run`: generate and display plan/proposals without writing or committing.
+- `--max-iterations <n>`: cap total loop iterations.
+- `--dry-run`: generate/print plan and diffs without writing or committing.
+
+## Workflow Summary
+
+1. Planner scans code files and requests a JSON plan from the model.
+2. Executor generates a full-file rewrite for one plan item and computes a unified diff.
+3. You choose `Apply`, `Skip`, or `Quit`.
+4. If applied, verifier runs lint and tests.
+5. On pass, the agent commits; on failure, it reverts the file and retries (up to limit).
+
+Safety behavior:
+- One file per plan item.
+- Explicit approval before write.
+- Verification before commit.
+- Git branch auto-created with prefix `modernize/`.
 
 ## Interactive Controls
 
-During execution, each proposed file change prompts:
-- `A` or `Apply`: write file, run verification, and commit if successful.
-- `S` or `Skip`: ignore this plan item and continue.
-- `Q` or `Quit`: stop the run immediately.
+- `A` / `Apply`: apply change, verify, commit on success.
+- `S` / `Skip`: skip this plan item.
+- `Q` / `Quit`: stop immediately.
 
-Before item execution, the controller asks for plan confirmation (`Y/n`).
+Before execution starts, the plan is shown and confirmed with `Y/n`.
 
 ## Configuration
 
-Most operational settings are defined in `modernizer_agent/config.py` and several support environment variable overrides.
+Config lives in `modernizer_agent/config.py`.
 
-Key env vars:
-- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
-- `OLLAMA_MODEL` (default `qwen3:8b`)
-- `LOG_LEVEL` (default `INFO`)
-- `LOG_FILE` (optional; enables JSON log file output)
-- `LINTER_COMMAND` (default `ruff check`)
-- `TEST_COMMAND` (default `python3 -m pytest`)
+Environment variables:
+- `OLLAMA_BASE_URL` (default: `http://localhost:11434`)
+- `OLLAMA_MODEL` (default: `qwen3:8b`)
+- `LOG_LEVEL` (default: `INFO`)
+- `LOG_FILE` (optional JSON log file path)
+- `LINTER_COMMAND` (default: `ruff check`)
+- `TEST_COMMAND` (default: `python3 -m pytest`)
 
-Other safety/performance defaults are currently code constants, including:
-- max LLM JSON retries
-- LLM request timeout
-- per-item retry count
-- global max iterations
+Notes:
+- If primary linter is unavailable, fallback is `flake8`.
+- If pytest is missing, tests are skipped as non-fatal.
+- Pytest exit code `5` ("no tests collected") is treated as pass.
 
-## Output and Logging
+## Components
 
-- Human-readable terminal output for plans, diffs, and run summaries.
-- Structured JSON logging on stderr by default.
-- Optional JSON log file if `LOG_FILE` is set.
+- `modernizer_agent/main.py`: CLI bootstrap and banner.
+- `modernizer_agent/agent/controller.py`: LangGraph orchestration.
+- `modernizer_agent/agent/planner.py`: repo scan + plan generation.
+- `modernizer_agent/agent/executor.py`: change generation + diff/apply.
+- `modernizer_agent/agent/verifier.py`: lint/test result aggregation.
+- `modernizer_agent/agent/memory.py`: SQLite error/fix memory.
+- `modernizer_agent/tools/*.py`: safe file/git/test wrappers.
+- `modernizer_agent/llm/ollama_client.py`: Ollama JSON client.
+- `modernizer_agent/prompts/system_prompt.txt`: system prompt.
 
-Typical logged fields include:
-- `action`, `tool`, `iteration`, `result`
-- `file`, `plan_item`, `commit_hash`, `error`
-
-## Safety Model and Boundaries
-
-- File operations validate paths against repo root to prevent path traversal.
-- Only one file is targeted per plan item.
-- Changes are explicit and user-gated before write.
-- Verification runs before commit.
-- Failed verification triggers local file revert to original content.
-
-Note: the repo also includes a `revert_last_commit` git helper; it is not part of the default failure path used by the controller.
+Runtime memory DB default:
+- `modernizer_agent/database/memory.db` (created automatically).
 
 ## Limitations
 
-- LLM responses are constrained to JSON, but semantic quality still depends on model behavior.
-- Planning uses truncated file previews, which may miss deep cross-file context.
-- Multi-language support exists at planning level, but verification defaults are Python-centric unless overridden.
-- No sandboxing/isolation is built into execution of lint/test commands.
-
-## Development Notes
-
-- Keep prompts and parsing strict to minimize malformed model outputs.
-- Add tests around planner/executor parsing and verifier behavior for regressions.
-- If extending tools, preserve path validation and structured logging conventions.
+- Planning uses truncated file previews.
+- Semantic change quality depends on model behavior.
+- Verification defaults are Python-centric unless commands are overridden.
+- No sandbox/isolation for lint/test command execution.
