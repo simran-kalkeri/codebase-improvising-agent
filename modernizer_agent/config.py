@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Configuration module for the Modernization Agent.
 

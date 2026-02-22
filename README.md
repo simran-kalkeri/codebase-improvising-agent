@@ -1,6 +1,6 @@
 # Modernizer Agent
 
-Modernizer Agent is a local, iterative code-modernization assistant. It scans a target repository, creates a file-by-file modernization plan, proposes concrete edits, asks for user approval, verifies each accepted change (lint + tests), and commits successful updates on a dedicated branch.
+Modernizer Agent is a local, iterative code-modernization assistant built around a LangGraph workflow. It scans a target repository, creates a file-by-file modernization plan, proposes concrete edits, asks for user approval, verifies each accepted change (lint + tests), and commits successful updates on a dedicated branch.
 
 The system is designed to be conservative:
 - one plan item per file
@@ -64,6 +64,7 @@ the agent executes this loop:
 
 ### 5) Controller
 - Coordinates full lifecycle: plan -> propose -> approve -> verify -> commit/retry.
+- Uses a LangGraph state graph to orchestrate setup, item processing, and completion.
 - Creates or checks out a `modernize/*` branch before changes.
 - Enforces retry cap per item and optional total iteration cap.
 

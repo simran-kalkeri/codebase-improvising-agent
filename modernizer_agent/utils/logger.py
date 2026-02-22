@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Structured logging module for the Modernization Agent.
 

@@ -21,18 +21,19 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TypedDict
 
+from langgraph.graph import END, START, StateGraph
 from modernizer_agent.agent.executor import Executor, RecommendedChange
 from modernizer_agent.agent.memory import MemoryStore
 from modernizer_agent.agent.planner import ModernizationPlan, PlanItem, Planner
 from modernizer_agent.agent.verifier import Verifier
-from modernizer_agent.config import DATABASE_PATH, MAX_RETRIES_PER_ITEM, SYSTEM_PROMPT_PATH
+from modernizer_agent.config import DATABASE_PATH, MAX_RETRIES_PER_ITEM
 from modernizer_agent.llm.ollama_client import OllamaClient
 from modernizer_agent.tools.git_tools import (
     commit,
     create_branch,
     is_git_repo,
-    revert_last_commit,
 )
 from modernizer_agent.utils.logger import get_logger
 
@@ -45,6 +46,18 @@ _YELLOW = "\033[93m"
 _CYAN = "\033[96m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
+
+
+class ControllerState(TypedDict, total=False):
+    """LangGraph state payload for orchestration."""
+    idx: int
+    total: int
+    current_item: PlanItem
+    completed: int
+    skipped: int
+    failed: int
+    stop: bool
+    quit: bool
 
 
 class Controller:
@@ -72,73 +85,188 @@ class Controller:
         self.verifier = Verifier(repo_path=repo_path)
 
         self._iteration = 0
+        self._plan: ModernizationPlan | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Execute the full modernization loop."""
+        """Execute the full modernization loop using LangGraph orchestration."""
         log.info("Controller starting", extra={
             "action": "start", "tool": "controller", "iteration": 0,
         })
 
-        # --- Pre-flight checks ---
+        graph = self._build_graph()
+        graph.invoke({
+            "idx": 0,
+            "completed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "stop": False,
+            "quit": False,
+        })
+
+    def _build_graph(self):
+        """Build and compile the LangGraph workflow."""
+        workflow = StateGraph(ControllerState)
+
+        workflow.add_node("setup", self._setup_node)
+        workflow.add_node("next_item", self._next_item_node)
+        workflow.add_node("process_item", self._process_item_node)
+        workflow.add_node("summary", self._summary_node)
+
+        workflow.add_edge(START, "setup")
+        workflow.add_conditional_edges(
+            "setup",
+            self._route_after_setup,
+            {
+                "next_item": "next_item",
+                "end": END,
+            },
+        )
+        workflow.add_conditional_edges(
+            "next_item",
+            self._route_after_next_item,
+            {
+                "process_item": "process_item",
+                "summary": "summary",
+            },
+        )
+        workflow.add_conditional_edges(
+            "process_item",
+            self._route_after_process_item,
+            {
+                "next_item": "next_item",
+                "summary": "summary",
+            },
+        )
+        workflow.add_edge("summary", END)
+
+        return workflow.compile()
+
+    def _setup_node(self, _: ControllerState) -> ControllerState:
+        """Pre-flight checks, planning, user confirmation, and branch setup."""
         if not self._preflight():
-            return
+            self.memory.close()
+            return {"stop": True}
 
-        # --- Step 1: Generate plan ---
         print(f"\n{_CYAN}{_BOLD}▶ Generating modernization plan...{_RESET}\n")
-        plan = self.planner.generate_plan(self.goal)
+        self._plan = self.planner.generate_plan(self.goal)
 
-        if len(plan) == 0:
+        if self._plan is None or len(self._plan) == 0:
             print(f"{_YELLOW}No changes to make. The repository may already be up to date.{_RESET}")
-            return
+            self.memory.close()
+            return {"stop": True}
 
-        # Show plan to user.
-        self._display_plan(plan)
-
-        # Ask user to confirm the plan.
+        self._display_plan(self._plan)
         if not self._confirm("Proceed with this plan?"):
             print("Aborted by user.")
-            return
+            self.memory.close()
+            return {"stop": True}
 
-        # --- Step 2: Create a working branch ---
         if not self.dry_run:
             branch_name = self.goal.lower().replace(" ", "-")[:40]
             branch = create_branch(branch_name, self.repo_path)
             print(f"{_GREEN}Created branch: {branch}{_RESET}\n")
 
-        # --- Step 3: Execute each plan item ---
-        completed = 0
-        skipped = 0
-        failed = 0
+        return {
+            "idx": 0,
+            "total": len(self._plan),
+            "completed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "stop": False,
+            "quit": False,
+        }
 
-        for idx, item in enumerate(plan.items, 1):
-            self._iteration += 1
+    def _next_item_node(self, state: ControllerState) -> ControllerState:
+        """Select the next plan item or stop when finished/capped."""
+        if self._plan is None:
+            return {"stop": True}
 
-            if self.max_iterations and self._iteration > self.max_iterations:
-                print(f"\n{_YELLOW}Reached max iterations ({self.max_iterations}). Stopping.{_RESET}")
-                break
+        idx = state.get("idx", 0)
+        total = state.get("total", len(self._plan))
 
-            print(f"\n{_CYAN}{_BOLD}━━━ Item {idx}/{len(plan)} ━━━{_RESET}")
-            print(f"  File:   {item.file}")
-            print(f"  Change: {item.change}\n")
+        if idx >= total:
+            return {"stop": True}
 
-            result = self._process_item(item, idx, len(plan))
+        self._iteration += 1
+        if self.max_iterations and self._iteration > self.max_iterations:
+            print(f"\n{_YELLOW}Reached max iterations ({self.max_iterations}). Stopping.{_RESET}")
+            return {"stop": True}
 
-            if result == "completed":
-                completed += 1
-            elif result == "skipped":
-                skipped += 1
-            elif result == "failed":
-                failed += 1
-            elif result == "quit":
-                break
+        item = self._plan.items[idx]
+        print(f"\n{_CYAN}{_BOLD}━━━ Item {idx + 1}/{total} ━━━{_RESET}")
+        print(f"  File:   {item.file}")
+        print(f"  Change: {item.change}\n")
 
-        # --- Summary ---
-        self._print_summary(completed, skipped, failed, len(plan))
+        return {"current_item": item, "stop": False}
+
+    def _process_item_node(self, state: ControllerState) -> ControllerState:
+        """Execute one plan item and update counters/state."""
+        item = state.get("current_item")
+        idx = state.get("idx", 0)
+        total = state.get("total", 0)
+
+        if item is None:
+            return {"stop": True}
+
+        result = self._process_item(item, idx + 1, total)
+        completed = state.get("completed", 0)
+        skipped = state.get("skipped", 0)
+        failed = state.get("failed", 0)
+
+        updates: ControllerState = {"idx": idx + 1}
+
+        if result == "completed":
+            updates["completed"] = completed + 1
+        elif result == "skipped":
+            updates["skipped"] = skipped + 1
+        elif result == "failed":
+            updates["failed"] = failed + 1
+        elif result == "quit":
+            updates["stop"] = True
+            updates["quit"] = True
+            updates["idx"] = idx
+
+        return updates
+
+    def _summary_node(self, state: ControllerState) -> ControllerState:
+        """Print summary and release resources."""
+        if self._plan is None:
+            self.memory.close()
+            return {}
+
+        self._print_summary(
+            completed=state.get("completed", 0),
+            skipped=state.get("skipped", 0),
+            failed=state.get("failed", 0),
+            total=len(self._plan),
+        )
         self.memory.close()
+        return {}
+
+    @staticmethod
+    def _route_after_setup(state: ControllerState) -> str:
+        """Route after setup."""
+        if state.get("stop"):
+            return "end"
+        return "next_item"
+
+    @staticmethod
+    def _route_after_next_item(state: ControllerState) -> str:
+        """Route from item selection to either processing or summary."""
+        if state.get("stop"):
+            return "summary"
+        return "process_item"
+
+    @staticmethod
+    def _route_after_process_item(state: ControllerState) -> str:
+        """Route after processing an item."""
+        if state.get("stop"):
+            return "summary"
+        return "next_item"
 
     # ------------------------------------------------------------------
     # Item processing (the inner loop)

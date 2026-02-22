@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Test and linting tools for the Modernization Agent.
 

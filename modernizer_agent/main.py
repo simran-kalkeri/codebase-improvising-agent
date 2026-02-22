@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 main.py — CLI entry point for the Self-Improving Codebase Modernization Agent.
 
@@ -17,7 +19,6 @@ from modernizer_agent.config import (
     MAX_TOTAL_ITERATIONS,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
-    SYSTEM_PROMPT_PATH,
 )
 from modernizer_agent.utils.logger import get_logger
 
@@ -81,7 +82,6 @@ def print_banner(args: argparse.Namespace) -> None:
 ║  Dry run      : {str(args.dry_run):<43}║
 ║  Log level    : {LOG_LEVEL:<43}║
 ║  DB path      : {str(DATABASE_PATH):<43}║
-║  Prompt file  : {str(SYSTEM_PROMPT_PATH):<43}║
 ╚══════════════════════════════════════════════════════════════╝
 """
     print(banner)

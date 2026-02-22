@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "modernizer-agent"
+version = "0.1.0"
+description = "Self-improving codebase modernization agent powered by local LLMs."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28.0",
+    "langgraph>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+modernizer-agent = "modernizer_agent.main:main"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["modernizer_agent*"]
